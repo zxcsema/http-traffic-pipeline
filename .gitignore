@@ -1,0 +1,14 @@
+.env
+.venv/
+.idea/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+work/
+logs/
+airflow.db*
+airflow.cfg
+standalone_admin_password.txt
+*.log
+*.tmp
+.DS_Store

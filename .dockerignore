@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!requirements.txt
+!traffic.py
+!dags/
+!dags/*.py
+!sql/
+!sql/*.sql

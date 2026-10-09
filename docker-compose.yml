@@ -1,0 +1,63 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8.1.5101
+    environment:
+      CLICKHOUSE_DB: traffic
+      CLICKHOUSE_USER: traffic
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Copy .env.example to .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "127.0.0.1:${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql:/sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user traffic --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  airflow:
+    build:
+      context: .
+      network: ${BUILD_NETWORK:-default}
+    user: "${AIRFLOW_UID:-50000}:0"
+    command: standalone
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/project/dags
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: utc
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__CORE__DAG_RUN_CONF_OVERRIDES_PARAMS: "true"
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: traffic
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Copy .env.example to .env}
+    ports:
+      - "127.0.0.1:${AIRFLOW_WEB_PORT:-8080}:8080"
+    volumes:
+      - airflow_state:/opt/airflow
+      - pipeline_work:/opt/project/work
+      - ./data:/opt/project/data:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json, urllib.request; health = json.load(urllib.request.urlopen('http://localhost:8080/health', timeout=5)); assert health['metadatabase']['status'] == health['scheduler']['status'] == 'healthy'"
+      interval: 10s
+      timeout: 10s
+      retries: 24
+      start_period: 60s
+
+volumes:
+  clickhouse_data:
+  airflow_state:
+  pipeline_work:
