@@ -22,7 +22,6 @@ services:
   airflow:
     build:
       context: .
-      network: ${BUILD_NETWORK:-default}
     user: "${AIRFLOW_UID:-50000}:0"
     command: standalone
     environment:

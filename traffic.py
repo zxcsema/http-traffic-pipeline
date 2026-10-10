@@ -111,7 +111,7 @@ def write_csv(path, fields, rows):
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(".tmp")
     with temporary.open("w", newline="", encoding="utf-8") as output:
-        writer = csv.writer(output)
+        writer = csv.writer(output, lineterminator="\n")
         writer.writerow(fields)
         writer.writerows(rows)
     temporary.replace(destination)
@@ -208,6 +208,12 @@ def compare_daily(process_date):
     with get_client() as client:
         etl = read_daily(client, "traffic_daily_etl", process_date)
         elt = read_daily(client, "traffic_daily_elt", process_date)
+    if not etl or not elt:
+        empty = ", ".join(name for name, rows in (("ETL", etl), ("ELT", elt)) if not rows)
+        raise ValueError(
+            f"Empty daily aggregate for {process_date}: {empty}. "
+            "Check the source CSV and cleaning rules; the demo must contain valid requests."
+        )
     if len(etl) != len(elt):
         raise ValueError("ETL and ELT have different group counts")
     for left, right in zip(etl, elt):

@@ -8,12 +8,12 @@ from airflow.operators.python import get_current_context
 
 @dag(
     dag_id="http_traffic_pipeline",
-    schedule="@daily",
+    schedule=None,
     start_date=pendulum.datetime(2025, 1, 1, tz="UTC"),
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 2, "retry_delay": timedelta(seconds=10)},
-    params={"process_date": Param(None, type=["null", "string"], format="date")},
+    params={"process_date": Param("2025-01-30", type="string", format="date")},
     tags=["http", "etl", "elt"],
 )
 def http_traffic_pipeline():
@@ -23,8 +23,6 @@ def http_traffic_pipeline():
 
         context = get_current_context()
         process_date = context["params"]["process_date"]
-        if process_date is None:
-            process_date = context["data_interval_start"].in_timezone("UTC").date().isoformat()
         parse_date(process_date)
         source = PROJECT_DIR / "data" / "raw" / f"{process_date}.csv"
         if not source.is_file():

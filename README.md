@@ -19,7 +19,7 @@ flowchart LR
     F --> G
 ```
 
-Из записей удаляются полные дубли, пустые обязательные поля, некорректные статусы и отрицательное время ответа. Дата события должна совпадать с датой файла. Из path убираются query-параметры. Правила одинаковы в обеих ветках.
+Сначала удаляются полные дубли исходных строк, затем пробелы по краям полей. Строки с пустыми обязательными полями, неверным timestamp, статусом вне 100–599, некорректным или отрицательным временем ответа отбрасываются. Дата события должна совпадать с `process_date`, а path начинаться с `/`. Из path убираются query-параметры. Правила одинаковы в обеих ветках.
 
 | Таблица | Содержимое |
 | --- | --- |
@@ -27,41 +27,115 @@ flowchart LR
 | `traffic_daily_etl` | Показатели, рассчитанные в Python |
 | `traffic_daily_elt` | Показатели, рассчитанные в ClickHouse |
 
-Таблицы используют MergeTree и месячные партиции `toYYYYMM`. Ключ витрин `(event_date, path)` соответствует запросам по дате и странице. Raw-таблица сортируется по `(source_date, path, request_id)`. При повторном запуске заменяются только данные выбранного дня.
+Таблицы используют MergeTree и месячные партиции `toYYYYMM`: фильтр по дате позволяет пропускать ненужные месяцы. Ключ сортировки витрин `(event_date, path)` подходит для запросов по дате и странице. Raw-таблица сортируется по `(source_date, path, request_id)`. Ключ сортировки не обеспечивает уникальность строк.
 
-Уникальные IP не равны пользователям. Их нельзя складывать между страницами и днями. В SQL используются `count`, `countIf`, `uniqExact` и `avg`.
+Повторная обработка сначала синхронно удаляет строки выбранного дня, затем вставляет результат заново. Остальные дни сохраняются. Это простой способ повторной загрузки для демо; удаление и вставка не являются одной транзакцией. DAG ограничен одним активным запуском, команды `dags test` следует выполнять последовательно.
+
+Сравнение требует непустых витрин и точного совпадения дат, страниц и целочисленных счётчиков. Дробные показатели сравниваются через `math.isclose` с `rel_tol=1e-9` и `abs_tol=1e-9`. Пустая витрина вызывает ошибку с датой и названием ветки.
+
+Уникальные IP не равны пользователям; их нельзя складывать между страницами и днями. Доля ошибок — `(4xx + 5xx) / requests`; время ответа измеряется в миллисекундах. Среднее за несколько групп нужно взвешивать по числу запросов. Среднее не показывает хвост распределения и не заменяет p95/p99. В SQL используются `count`, `countIf`, `uniqExact` и `avg`.
 
 ## Данные
 
-Демонстрационные данные синтетические. Готовые CSV лежат в `data/raw`: 20 000 строк за 30 января - 2 февраля 2025 года. В них есть дубли, некорректные числа и отрицательное время ответа.
+Данные синтетические и не содержат реального трафика. Готовые CSV в `data/raw` покрывают четыре дня: 30–31 января и 1–2 февраля 2025 года. Каждый файл содержит 5 000 строк: 4 800 корректных запросов, 100 полных дублей и 100 некорректных строк, включая записи за чужую дату. После очистки получается 7 групп страниц за день, всего 28 строк в каждой витрине.
+
+Воспроизвести приложенные файлы можно Python 3.11, без установки зависимостей:
+
+```bash
+python3 generate_data.py
+```
+
+Генератор использует фиксированный seed `42` и перезаписывает четыре демонстрационных CSV.
 
 Пример результата за 30 января:
 
 | path | requests | unique_ips | errors_4xx | errors_5xx | error_rate | avg_response_ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| / | 1169 | 199 | 119 | 53 | 0.147134 | 358.426869 |
-| /catalog | 1479 | 200 | 140 | 79 | 0.148073 | 355.992265 |
+| / | 1149 | 200 | 118 | 66 | 0.160139 | 347.178590 |
+| /catalog | 1469 | 199 | 148 | 64 | 0.144316 | 348.737216 |
 
 ## Запуск и проверка
 
-Команды выполняются в корне проекта:
+Нужны Docker Engine и Docker Compose v2 с поддержкой `--wait`. Команды выполняются в корне проекта. Python на хосте нужен только для тестов и генератора.
+
+Создайте локальные настройки:
 
 ```bash
 cp .env.example .env
-docker compose up -d --build --wait --wait-timeout 300
-docker compose exec airflow airflow dags test http_traffic_pipeline 2025-01-30 --conf '{"process_date":"2025-01-30"}'
 ```
 
-Успешный запуск завершается статусом `success`. Последняя задача выводит `ETL = ELT` и 7 групп страниц. Чтобы проверить повторную загрузку, выполните команду запуска DAG ещё раз: количество групп и показатели должны остаться прежними. Для другого дня поменяйте `process_date` и дату в команде.
+Если стандартные порты 8123 или 8080 заняты, выберите свободные порты в `.env`, например:
+
+```bash
+sed -i 's/^CLICKHOUSE_HTTP_PORT=.*/CLICKHOUSE_HTTP_PORT=18123/' .env
+sed -i 's/^AIRFLOW_WEB_PORT=.*/AIRFLOW_WEB_PORT=18080/' .env
+```
+
+Затем соберите образ и дождитесь готовности обоих сервисов:
+
+```bash
+docker compose up -d --build --wait --wait-timeout 300
+docker compose ps
+```
+
+DAG `http_traffic_pipeline` имеет `schedule=None` и запускается вручную. Параметр `process_date` выбирает CSV и день обработки; значение по умолчанию — `2025-01-30`. Дата запуска Airflow сама по себе не выбирает данные. Для демо доступны только четыре приложенных дня.
+
+Обработайте их последовательно:
+
+```bash
+for day in 2025-01-30 2025-01-31 2025-02-01 2025-02-02; do
+  docker compose exec -T airflow airflow dags test http_traffic_pipeline "$day" \
+    --conf "{\"process_date\":\"$day\"}"
+done
+```
+
+Каждый запуск завершается статусом `success`; последняя задача выводит `ETL = ELT` и 7 групп. `dags test` выполняет задачи напрямую и подходит для локальной проверки. Через интерфейс Airflow можно выбрать **Trigger DAG** и указать тот же `process_date`.
+
+Повторно обработайте один день:
+
+```bash
+docker compose exec -T airflow airflow dags test http_traffic_pipeline 2025-01-30 \
+  --conf '{"process_date":"2025-01-30"}'
+```
+
+После повторного запуска в raw-таблице остаётся 20 000 строк, в каждой витрине — 28; значения всех показателей сохраняются.
 
 Посмотреть витрину и выполнить аналитические запросы:
 
 ```bash
-docker compose exec clickhouse clickhouse-client --user traffic --password local_demo_password --query "SELECT * FROM traffic.traffic_daily_etl ORDER BY event_date, path LIMIT 10"
-docker compose exec clickhouse clickhouse-client --user traffic --password local_demo_password --multiquery --queries-file /sql/analytics.sql
-docker compose exec clickhouse clickhouse-client --user traffic --password local_demo_password --param_process_date=2025-01-30 --queries-file /sql/explain.sql
+docker compose exec -T clickhouse sh -c 'clickhouse-client --user traffic --password "$CLICKHOUSE_PASSWORD" --query "SELECT * FROM traffic.traffic_daily_etl ORDER BY event_date, path LIMIT 10"'
+docker compose exec -T clickhouse sh -c 'clickhouse-client --user traffic --password "$CLICKHOUSE_PASSWORD" --multiquery --queries-file /sql/analytics.sql'
+docker compose exec -T clickhouse sh -c 'clickhouse-client --user traffic --password "$CLICKHOUSE_PASSWORD" --param_process_date=2025-01-30 --queries-file /sql/explain.sql'
 ```
 
-Пароль в командах соответствует `.env.example`. Airflow доступен на http://localhost:8080, логин `admin`. Пароль можно получить командой `docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt`. Порты и параметры сборки задаются в `.env`.
+Airflow доступен на http://localhost:8080 при стандартном `AIRFLOW_WEB_PORT`, логин `admin`. Получить пароль:
 
-В `analytics.sql` есть посещаемость страниц, доля ошибок, статистика за диапазон дат и активные части таблиц. EXPLAIN показывает отбор частей по дате и гранул по ключу сортировки. После обработки четырёх дней в проверке MinMax оставил одну из четырёх частей; фильтр path не исключил дополнительные гранулы на маленькой витрине.
+```bash
+docker compose exec -T airflow cat /opt/airflow/standalone_admin_password.txt
+```
+
+`standalone`, SQLite и SequentialExecutor выбраны для небольшого локального демо. Конфигурация не рассчитана на промышленную эксплуатацию.
+
+Проверить Python-обработку, сравнение витрин и воспроизводимость генератора:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Тесты используют маленькие примеры с заранее рассчитанными метриками; Airflow и ClickHouse для них не нужны.
+
+Для проверки с чистого состояния удалите volumes этого Compose-проекта и повторите запуск и обработку выше. Команда удаляет его данные ClickHouse, состояние Airflow и промежуточные результаты:
+
+```bash
+docker compose down -v
+```
+
+В `analytics.sql` есть число запросов по страницам, доля ошибок, статистика за диапазон дат и активные части таблиц. На проверенном наборе после обработки четырёх дней `EXPLAIN indexes = 1` для даты `2025-01-30` и страницы `/catalog` показал:
+
+```text
+MinMax:     Parts 1/4, Granules 1/4
+Partition:  Parts 1/1, Granules 1/1
+PrimaryKey: Parts 1/1, Granules 1/1
+```
+
+Фильтр по дате оставил одну часть. Условие по `(event_date, path)` использовало первичный индекс, но не исключило дополнительных гранул на маленькой витрине. Это не измерение ускорения запроса. Число частей может меняться после фоновых слияний MergeTree, поэтому вывод на другом запуске может отличаться.
